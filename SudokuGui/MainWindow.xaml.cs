@@ -30,6 +30,8 @@ public partial class MainWindow : Window
     private readonly Brush _validBrush = Brushes.ForestGreen;
     private readonly Brush _invalidBrush = Brushes.IndianRed;
     private readonly Brush _candidateBrush = new SolidColorBrush(Color.FromRgb(90, 90, 100));
+    private readonly Brush _candidateRemovedBrush = new SolidColorBrush(Color.FromRgb(179, 120, 60));
+    private readonly Brush _candidateConflictBrush = new SolidColorBrush(Color.FromRgb(198, 40, 40));
     private readonly Brush _selectedBackground = new SolidColorBrush(Color.FromRgb(236, 244, 255));
     private readonly Brush _normalBackground = Brushes.White;
     private readonly Brush _sameNumberCircleBrush = new SolidColorBrush(Color.FromRgb(66, 133, 244));
@@ -45,14 +47,18 @@ public partial class MainWindow : Window
     private DifficultyLevel _currentDifficulty = DifficultyLevel.Expert;
     private bool _isGameComplete;
     private bool _showCandidates = true;
+    private bool _autoCandidates = false;
     private bool _boardInitialized;
     private SnapshotState? _snapshot;
+    private readonly CandidateMarkState[,,] _manualCandidateMarks = new CandidateMarkState[N, N, N];
+    private readonly CandidateCheckState[,,] _candidateChecks = new CandidateCheckState[N, N, N];
 
     public MainWindow()
     {
         InitializeComponent();
         BuildBoardUi();
         BuildNumberPad();
+        UpdateCandidateModeUi();
         GenerateAndLoadPuzzle();
     }
 
@@ -90,16 +96,46 @@ public partial class MainWindow : Window
                 var candidateTexts = new TextBlock[9];
                 for (int i = 0; i < 9; i++)
                 {
+                    int capturedDigit = i + 1;
                     var candidateText = new TextBlock
                     {
                         Text = string.Empty,
                         Foreground = _candidateBrush,
-                        FontSize = 10,
+                        FontSize = 12,
+                        FontWeight = FontWeights.Bold,
                         HorizontalAlignment = HorizontalAlignment.Center,
-                        VerticalAlignment = VerticalAlignment.Center
+                        VerticalAlignment = VerticalAlignment.Center,
+                        Cursor = Cursors.Hand
+                    };
+                    int capturedRowForCandidate = row;
+                    int capturedColForCandidate = col;
+                    candidateText.MouseLeftButtonDown += (_, e) =>
+                    {
+                        SelectCell(capturedRowForCandidate, capturedColForCandidate);
+
+                        if ((Keyboard.Modifiers & ModifierKeys.Control) == ModifierKeys.Control)
+                        {
+                            ToggleCandidateMark(capturedRowForCandidate, capturedColForCandidate, capturedDigit);
+                        }
+
+                        e.Handled = true;
+                    };
+                    candidateText.MouseRightButtonDown += (_, e) =>
+                    {
+                        MarkCandidateRemoved(capturedRowForCandidate, capturedColForCandidate, capturedDigit);
+                        e.Handled = true;
                     };
                     candidateTexts[i] = candidateText;
-                    candidateGrid.Children.Add(candidateText);
+
+                    var candidateSlotBorder = new Border
+                    {
+                        BorderBrush = new SolidColorBrush(Color.FromRgb(214, 214, 222)),
+                        BorderThickness = new Thickness(0.35),
+                        Margin = new Thickness(0.25),
+                        Child = candidateText
+                    };
+
+                    candidateGrid.Children.Add(candidateSlotBorder);
                 }
 
                 var valueText = new TextBlock
@@ -268,6 +304,8 @@ public partial class MainWindow : Window
         _redoStack.Clear();
         _isGameComplete = false;
         _highlightedDigit = 0;
+        ResetAllManualCandidateMarks();
+        ResetAllCandidateChecks();
         StatusTextBlock.Text =
             $"Difficulty: {generated.Profile.Name} | clues: {generated.Score.Clues} | score: {generated.Score.TotalScore} ({generated.Score.QualityBand})";
         RefreshBoard();
@@ -319,10 +357,50 @@ public partial class MainWindow : Window
 
                     if (_showCandidates)
                     {
-                        HashSet<int> candidates = _engine.GetCandidates(_current, row, col);
-                        for (int i = 0; i < 9; i++)
+                        if (_autoCandidates)
                         {
-                            view.CandidateTexts[i].Text = candidates.Contains(i + 1) ? (i + 1).ToString() : string.Empty;
+                            HashSet<int> candidates = _engine.GetCandidates(_current, row, col);
+                            for (int i = 0; i < 9; i++)
+                            {
+                                int digit = i + 1;
+                                bool present = candidates.Contains(digit);
+                                CandidateMarkState mark = _manualCandidateMarks[row, col, i];
+
+                                view.CandidateTexts[i].Text = present ? digit.ToString() : string.Empty;
+                                view.CandidateTexts[i].Foreground = present && mark == CandidateMarkState.Removed
+                                    ? _candidateRemovedBrush
+                                    : _candidateBrush;
+                                view.CandidateTexts[i].TextDecorations = present && mark == CandidateMarkState.Removed
+                                    ? TextDecorations.Strikethrough
+                                    : null;
+                                view.CandidateTexts[i].Opacity = present && mark == CandidateMarkState.Removed ? 0.28 : 0.95;
+                            }
+                        }
+                        else
+                        {
+                            for (int i = 0; i < 9; i++)
+                            {
+                                CandidateMarkState mark = _manualCandidateMarks[row, col, i];
+                                CandidateCheckState check = _candidateChecks[row, col, i];
+                                view.CandidateTexts[i].Text = (i + 1).ToString();
+                                view.CandidateTexts[i].Foreground = check != CandidateCheckState.None
+                                    ? _candidateConflictBrush
+                                    : mark switch
+                                    {
+                                        CandidateMarkState.Removed => _candidateRemovedBrush,
+                                        _ => _candidateBrush
+                                    };
+                                view.CandidateTexts[i].TextDecorations = BuildCandidateDecorations(mark, check);
+                                view.CandidateTexts[i].Opacity = mark switch
+                                {
+                                    CandidateMarkState.Removed => 0.28,
+                                    _ => 1.0
+                                };
+                                if (check != CandidateCheckState.None)
+                                {
+                                    view.CandidateTexts[i].Opacity = 1.0;
+                                }
+                            }
                         }
                     }
                     else
@@ -330,6 +408,8 @@ public partial class MainWindow : Window
                         for (int i = 0; i < 9; i++)
                         {
                             view.CandidateTexts[i].Text = string.Empty;
+                            view.CandidateTexts[i].TextDecorations = null;
+                            view.CandidateTexts[i].Opacity = 1.0;
                         }
                     }
                 }
@@ -369,6 +449,8 @@ public partial class MainWindow : Window
         }
 
         _current[row, col] = newValue;
+        ResetManualCandidateMarksForCell(row, col);
+        ResetCandidateChecksForCell(row, col);
 
         if (_highlightedDigit != 0 && newValue != 0)
         {
@@ -600,6 +682,77 @@ public partial class MainWindow : Window
         ShowCandidatesCheckBox.IsChecked = !(ShowCandidatesCheckBox.IsChecked == true);
     }
 
+    private void AutoCandidatesButton_Click(object sender, RoutedEventArgs e)
+    {
+        _autoCandidates = !_autoCandidates;
+        UpdateCandidateModeUi();
+        ClearCandidateChecks();
+        StatusTextBlock.Text = _autoCandidates
+            ? "Auto candidates enabled. You can still mark removals with Ctrl+Click or right-click."
+            : "Auto candidates disabled. Click candidate numbers to toggle marks.";
+        RefreshBoard();
+    }
+
+    private void CheckCandidatesButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (_autoCandidates)
+        {
+            StatusTextBlock.Text = "Turn off Auto Candidates first, then check manual marks.";
+            return;
+        }
+
+        int conflicts = 0;
+        int wrongKeep = 0;
+        int wrongRemove = 0;
+        int editableCells = 0;
+        for (int row = 0; row < N; row++)
+        {
+            for (int col = 0; col < N; col++)
+            {
+                if (_current[row, col] != 0)
+                {
+                    continue;
+                }
+
+                editableCells++;
+                HashSet<int> actual = _engine.GetCandidates(_current, row, col);
+                for (int i = 0; i < N; i++)
+                {
+                    int digit = i + 1;
+                    bool shouldKeep = actual.Contains(digit);
+                    bool userRemoved = _manualCandidateMarks[row, col, i] == CandidateMarkState.Removed;
+                    if (shouldKeep && userRemoved)
+                    {
+                        _candidateChecks[row, col, i] = CandidateCheckState.WrongRemove;
+                        conflicts++;
+                        wrongRemove++;
+                    }
+                    else if (!shouldKeep && !userRemoved)
+                    {
+                        _candidateChecks[row, col, i] = CandidateCheckState.WrongKeep;
+                        conflicts++;
+                        wrongKeep++;
+                    }
+                    else
+                    {
+                        _candidateChecks[row, col, i] = CandidateCheckState.None;
+                    }
+                }
+            }
+        }
+
+        if (conflicts == 0)
+        {
+            StatusTextBlock.Text = $"Check complete: no conflicts in {editableCells} empty cells.";
+        }
+        else
+        {
+            StatusTextBlock.Text = $"Check complete: {conflicts} conflicts (wrong keep: {wrongKeep}, wrong remove: {wrongRemove}).";
+        }
+
+        RefreshBoard();
+    }
+
     private void UpdateNumberPadState()
     {
         for (int digit = 1; digit <= 9; digit++)
@@ -680,6 +833,8 @@ public partial class MainWindow : Window
         _isGameComplete = false;
         _undoStack.Clear();
         _redoStack.Clear();
+        ResetAllManualCandidateMarks();
+        ResetAllCandidateChecks();
     }
 
     private SnapshotState CreateSnapshotFromCurrent()
@@ -707,6 +862,140 @@ public partial class MainWindow : Window
             : null;
         _undoStack.Clear();
         _redoStack.Clear();
+        ResetAllManualCandidateMarks();
+        ResetAllCandidateChecks();
+    }
+
+    private void ToggleCandidateMark(int row, int col, int digit)
+    {
+        if (!_showCandidates)
+        {
+            return;
+        }
+
+        if (_current[row, col] != 0)
+        {
+            return;
+        }
+
+        SelectCell(row, col);
+        int idx = digit - 1;
+        CandidateMarkState current = _manualCandidateMarks[row, col, idx];
+        _candidateChecks[row, col, idx] = CandidateCheckState.None;
+        _manualCandidateMarks[row, col, idx] = current switch
+        {
+            CandidateMarkState.Normal => CandidateMarkState.Removed,
+            CandidateMarkState.Removed => CandidateMarkState.Normal,
+            _ => CandidateMarkState.Normal
+        };
+
+        RefreshBoard();
+    }
+
+    private void MarkCandidateRemoved(int row, int col, int digit)
+    {
+        if (!_showCandidates)
+        {
+            return;
+        }
+
+        if (_current[row, col] != 0)
+        {
+            return;
+        }
+
+        SelectCell(row, col);
+        int idx = digit - 1;
+        _candidateChecks[row, col, idx] = CandidateCheckState.None;
+        _manualCandidateMarks[row, col, idx] = CandidateMarkState.Removed;
+        RefreshBoard();
+    }
+
+    private void UpdateCandidateModeUi()
+    {
+        if (FindName("AutoCandidatesButton") is Button autoButton)
+        {
+            autoButton.Content = _autoCandidates ? "Auto Candidates: On" : "Auto Candidates: Off";
+        }
+
+        if (FindName("CheckCandidatesButton") is Button checkButton)
+        {
+            checkButton.IsEnabled = !_autoCandidates;
+            checkButton.Opacity = checkButton.IsEnabled ? 1.0 : 0.55;
+        }
+    }
+
+    private void ResetAllManualCandidateMarks()
+    {
+        for (int row = 0; row < N; row++)
+        {
+            for (int col = 0; col < N; col++)
+            {
+                for (int i = 0; i < N; i++)
+                {
+                    _manualCandidateMarks[row, col, i] = CandidateMarkState.Normal;
+                }
+            }
+        }
+    }
+
+    private void ResetAllCandidateChecks()
+    {
+        for (int row = 0; row < N; row++)
+        {
+            for (int col = 0; col < N; col++)
+            {
+                for (int i = 0; i < N; i++)
+                {
+                    _candidateChecks[row, col, i] = CandidateCheckState.None;
+                }
+            }
+        }
+    }
+
+    private void ResetManualCandidateMarksForCell(int row, int col)
+    {
+        for (int i = 0; i < N; i++)
+        {
+            _manualCandidateMarks[row, col, i] = CandidateMarkState.Normal;
+        }
+    }
+
+    private void ResetCandidateChecksForCell(int row, int col)
+    {
+        for (int i = 0; i < N; i++)
+        {
+            _candidateChecks[row, col, i] = CandidateCheckState.None;
+        }
+    }
+
+    private void ClearCandidateChecks()
+    {
+        for (int row = 0; row < N; row++)
+        {
+            for (int col = 0; col < N; col++)
+            {
+                for (int i = 0; i < N; i++)
+                {
+                    _candidateChecks[row, col, i] = CandidateCheckState.None;
+                }
+            }
+        }
+    }
+
+    private static TextDecorationCollection? BuildCandidateDecorations(CandidateMarkState mark, CandidateCheckState check)
+    {
+        if (check == CandidateCheckState.WrongKeep)
+        {
+            return TextDecorations.Underline;
+        }
+
+        if (check == CandidateCheckState.WrongRemove)
+        {
+            return TextDecorations.Strikethrough;
+        }
+
+        return mark == CandidateMarkState.Removed ? TextDecorations.Strikethrough : null;
     }
 
     private static string BuildUniqueSaveFileName()
@@ -766,6 +1055,19 @@ public partial class MainWindow : Window
     }
 
     private readonly record struct MoveRecord(int Row, int Col, int OldValue, int NewValue);
+
+    private enum CandidateMarkState
+    {
+        Normal,
+        Removed
+    }
+
+    private enum CandidateCheckState
+    {
+        None,
+        WrongKeep,
+        WrongRemove
+    }
 
     private readonly record struct SnapshotState(
         int[] Puzzle,

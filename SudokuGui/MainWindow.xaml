@@ -98,6 +98,17 @@
                         Height="40"
                         Margin="6,0,0,8"
                         Click="ShowCandidatesToggleButton_Click"/>
+
+                <Button x:Name="AutoCandidatesButton"
+                        Content="Auto Candidates: Off"
+                        Height="40"
+                        Margin="0,0,6,8"
+                        Click="AutoCandidatesButton_Click"/>
+                <Button x:Name="CheckCandidatesButton"
+                        Content="Check Candidates"
+                        Height="40"
+                        Margin="6,0,0,8"
+                        Click="CheckCandidatesButton_Click"/>
             </UniformGrid>
 
             <CheckBox x:Name="ShowCandidatesCheckBox"
